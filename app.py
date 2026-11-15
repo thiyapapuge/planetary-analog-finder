@@ -3418,7 +3418,7 @@ with st.sidebar:
                 "style='width:100%;max-width:200px;margin:0 0 6px'>", unsafe_allow_html=True)
     st.caption("NASA Space Apps Challenge 2026 · Team Proteus 2")
     st.markdown("<div style='font-size:0.85rem;color:#c9d1d9;line-height:1.6;margin:-0.4rem 0 0.8rem'>"
-                "Lilian JAO<br>Jaime SOUSA<br>Thiya PAPUGE<br>Emma TROTIGNON</div>", unsafe_allow_html=True)
+                "Lilian JAOUEN<br>Thiya PAPUGE<br>Jaime SOUSA<br>Emma TROTIGNON</div>", unsafe_allow_html=True)
     st.caption("App version: v3.9 · 15 Nov 12:55")
     st.caption(f"Data: {TOP_FILE} · " + (FILE_WORLD if find_file(FILE_WORLD) is not None else "embedded world scan (14 Nov)"))
     st.caption("Built with the help of AI tools · see About this project")
