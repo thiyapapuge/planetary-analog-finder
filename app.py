@@ -1543,6 +1543,17 @@ def read_csv_robust(raw: bytes) -> pd.DataFrame:
     return df
 
 
+# Data values written in French by the Earth Engine scripts -> English for display
+VALUE_EN = {
+    "typologie": {"Désert froid d'altitude": "High-altitude cold desert", "Désert froid de plaine/polaire": "Cold lowland or polar desert",
+                  "Désert tempéré": "Temperate desert", "Désert chaud": "Hot desert"},
+    "morphotype": {"Bassin à relief modéré (type Jezero)": "Basin with moderate relief (Jezero-like)",
+                   "Intermédiaire": "Intermediate", "Plaine plate / salar": "Flat plain or salt flat",
+                   "Relief accidenté": "Rugged relief"},
+    "signal_argiles": {"faible": "weak", "moyen": "moderate", "fort": "strong"},
+}
+
+
 def harmonize(df: pd.DataFrame) -> pd.DataFrame:
     index = {_key(c): c for c in df.columns}
     rename = {}
@@ -1557,6 +1568,9 @@ def harmonize(df: pd.DataFrame) -> pd.DataFrame:
     for c in ("zone_disputee", "aire_protegee"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+    for c, mapping in VALUE_EN.items():
+        if c in df.columns:
+            df[c] = df[c].map(lambda v: mapping.get(str(v).strip(), v))
     return df
 
 
@@ -1714,7 +1728,8 @@ def analogy(r):
     g = lambda c: r[c] if c in r.index and pd.notna(r[c]) else None
     sw, t, nd, ar, sl, rl = (g(c) for c in ("amplitude_k", "temp_moy_c", "ndvi_max", "aridite", "pente_moy_deg", "relief_local_m"))
     if sw is not None:
-        weak.append(f"Day–night swing: <b>{sw:.0f} K</b> here vs <b>≈ {JEZERO_SWING_K} K</b> on Jezero. "
+        weak.append(f"Day–night swing: <b>{sw:.0f} K</b> here vs <b>≈ {JEZERO_SWING_K} K</b> on Jezero "
+                    f"(<b>{sw / JEZERO_SWING_K:.0%}</b> of Jezero's). "
                     "Earth's thick atmosphere damps the swing, so no place on Earth gets close.")
     if t is not None:
         if t <= -15:
@@ -1738,7 +1753,7 @@ def analogy(r):
                                                else "Rock is less mafic than Jezero's floor")
     sig = str(r.get("signal_argiles", "") or "").lower()
     if sig:
-        if sig.startswith(("moyen", "fort", "medium", "strong")):
+        if sig.startswith(("moyen", "fort", "moderate", "strong")):
             strong.append(f"Clay signal: {escape(clay_en(sig))}, a possible trace of past water, like the Jezero delta")
         else:
             weak.append(f"Clay signal: {escape(clay_en(sig))}, little sign of water-altered minerals")
@@ -1907,7 +1922,7 @@ def site_panel(rank: int, sel_key: str):
         if fig is not None:
             st.markdown("#### Best suited for")
             st.plotly_chart(fig, use_container_width=True, key=f"uc_{sel_key}_{rank}")
-            st.caption("How each test-use is computed: page 3 · Compare sites.")
+            st.caption("How each experiment is scored: page 3 · Compare sites.")
         st.markdown("")
         c3, c4 = st.columns(2)
         if "acces_heures" in r.index and pd.notna(r["acces_heures"]):
@@ -2028,34 +2043,61 @@ def add_use_cases(df: pd.DataFrame) -> pd.DataFrame:
     df["m_climate"] = g("env_moy")
     df["m_terrain"] = g("relief_moy")
     df["m_rock"] = g("compo_moy")
-    df["m_clay"] = _ramp(g("ratio_argiles"), 1.0, 1.27)               # 1.27 = site #4, moderate signal
+    df["m_clay"] = _ramp(g("ratio_argiles"), 1.0, CLAY_MAX)            # 1.00 -> best clay ratio of the top 100
     df["m_flat"] = _ramp(g("pente_moy_deg"), 5.0, 0.0)                # 0° = 1, 5° = 0
     df["m_dry"] = _ramp(g("aridite"), 0.65, 0.03)                     # model's aridity ramp
     df["m_bare"] = _ramp(g("ndvi_max"), 0.5, 0.05)                    # model's NDVI ramp
     df["m_swing"] = _ramp(g("amplitude_k"), 10, 35)                   # model's swing ramp
     df["m_access"] = _ramp(g("acces_heures"), 24, 2)                  # ≤ 2 h = 1, ≥ 24 h = 0
     df["m_status"] = g("status", "ok").map({"ok": 1.0, "protected": 0.5, "disputed": 0.0})
+    df["m_cold"] = _ramp(g("temp_moy_c"), 25, -15)                   # model's temperature ramp: 25 °C -> -15 °C
+    rl = g("relief_local_m")                                          # model's relief trapezoid 20/100/500/1500 m
+    df["m_relief"] = np.clip(np.minimum(np.minimum((rl - 20) / 80, 1), (1500 - rl) / 1000), 0, 1)
+    df["m_extent"] = _ramp(g("part_case"), 0.10, 0.50)                # share of the 25 km cell passing the model
     for code, (_, parts, _) in USE_CASES.items():
         df[code] = sum(w * df[c] for c, w in parts.items()) / sum(parts.values())
     return df
 
 
-METRIC_LABELS = {"m_climate": "Climate", "m_terrain": "Terrain", "m_rock": "Rock (mafic)", "m_clay": "Clay signal",
-                 "m_flat": "Flatness", "m_dry": "Dryness", "m_bare": "No vegetation", "m_swing": "Day–night swing",
-                 "m_access": "Access", "m_status": "Legal status"}
-USE_CASES = {  # code: (label, weights of sub-scores, why)
-    "uc_rover": ("Rover mobility & landing tests", {"m_flat": 0.4, "m_terrain": 0.4, "m_access": 0.2},
-                 "a flat, crater-like floor to drive and land on, reachable with heavy equipment"),
-    "uc_instr": ("Instrument & geology tests", {"m_rock": 0.6, "m_clay": 0.4},
-                 "Jezero-like rocks and clays to calibrate spectrometers"),
-    "uc_env": ("Environment & thermal tests", {"m_climate": 0.6, "m_swing": 0.4},
-               "cold, dry, with big day–night swings to stress hardware"),
-    "uc_bio": ("Astrobiology & biosignatures", {"m_dry": 0.35, "m_bare": 0.25, "m_clay": 0.4},
-               "almost lifeless and dry, with clays that may preserve traces of life"),
-    "uc_field": ("Field campaign logistics", {"m_access": 0.7, "m_status": 0.3},
-                 "short trip from a city, no dispute, no permit"),
+METRIC_LABELS = {"m_climate": "Climate", "m_terrain": "Terrain (basin)", "m_rock": "Rock (mafic)", "m_clay": "Clay signal",
+                 "m_flat": "Flatness", "m_dry": "Dryness", "m_bare": "Bare ground", "m_swing": "Day–night swing",
+                 "m_access": "Access", "m_status": "Legal status", "m_cold": "Cold", "m_relief": "Crater-like relief",
+                 "m_extent": "Size of the zone"}
+USE_CASES = {  # code: (label, weights of sub-scores, what the experiment needs)
+    "uc_land": ("Landing & hazard mapping", {"m_flat": 0.50, "m_extent": 0.30, "m_terrain": 0.20},
+                "a large, very flat zone to test hazard detection and landing-site mapping"),
+    "uc_rover": ("Rover driving & navigation", {"m_flat": 0.35, "m_relief": 0.25, "m_terrain": 0.20, "m_rock": 0.20},
+                 "a drivable basin floor ringed by moderate relief, on Jezero-like rock"),
+    "uc_instr": ("Instruments & geology", {"m_rock": 0.50, "m_clay": 0.30, "m_bare": 0.20},
+                 "bare, Jezero-like rock and clays to test and calibrate spectrometers"),
+    "uc_bio": ("Astrobiology & biosignatures", {"m_clay": 0.35, "m_dry": 0.30, "m_bare": 0.20, "m_terrain": 0.15},
+               "dry, almost lifeless ground in a basin, with clays that can preserve traces of past life, "
+               "like Jezero's lake deposits"),
+    "uc_env": ("Environment & thermal stress", {"m_swing": 0.40, "m_cold": 0.35, "m_dry": 0.25},
+               "big day–night swings, cold and dry air to stress hardware"),
+    "uc_crew": ("Crewed-mission simulation", {"m_access": 0.35, "m_climate": 0.25, "m_flat": 0.20, "m_terrain": 0.20},
+                "a habitat-style campaign: a crew must get there and be evacuated, flat ground for a habitat, "
+                "Mars-like surroundings"),
 }
-UC_COLORS = {"uc_rover": "#f2b134", "uc_instr": "#4fc3f7", "uc_env": "#bc8cff", "uc_bio": "#2e9e5b", "uc_field": "#e0e0e0"}
+# Go / no-go requirements for some experiments
+REQUIREMENTS = {
+    "uc_land": ("mean slope under 2°", lambda d: d["pente_moy_deg"] < 2),
+    "uc_rover": ("mean slope under 5°", lambda d: d["pente_moy_deg"] < 5),
+    "uc_crew": ("not in a disputed territory and under 12 h from a city",
+                lambda d: (d["status"] != "disputed") & (d["acces_heures"] <= 12)),
+}
+# What the data cannot tell, said plainly
+UC_LIMITS = {
+    "uc_land": "Slope comes from a 90 m elevation model: rocks and small hazards are not visible.",
+    "uc_rover": "Slope comes from a 90 m elevation model; surface type (salt crust, sand, rock) is not measured.",
+    "uc_instr": "ASTER sees the surface at 90–100 m; salts are not measured.",
+    "uc_bio": "Satellite data cannot detect life or organics: this score shows where to look, "
+              "like Perseverance in Jezero's lake deposits.",
+    "uc_env": "Altitude, wind and dust are not measured. Even the best site reaches well under half of Jezero's daily swing.",
+    "uc_crew": "Travel time comes from a 2015 global map (cities over 50,000 people); it ignores altitude, track condition and permits.",
+}
+UC_COLORS = {"uc_land": "#ffd27a", "uc_rover": "#f2b134", "uc_instr": "#4fc3f7", "uc_bio": "#2e9e5b",
+             "uc_env": "#bc8cff", "uc_crew": "#e0e0e0"}
 
 
 def plot_dark(fig, height=380):
@@ -2110,12 +2152,13 @@ with st.sidebar:
     st.caption("NASA Space Apps Challenge 2026 · Team Proteus 2")
     st.markdown("<div style='font-size:0.85rem;color:#c9d1d9;line-height:1.6;margin:-0.4rem 0 0.8rem'>"
                 "Lilian JAO<br>Jaime SOUSA<br>Thiya PAPUGE<br>Emma TROTIGNON</div>", unsafe_allow_html=True)
-    st.caption("App version: v3.0 · 14 Nov 19:30")
+    st.caption("App version: v3.2 · 15 Nov 10:40")
     st.caption(f"Data: {TOP_FILE} · " + (FILE_WORLD if find_file(FILE_WORLD) is not None else "embedded world scan (14 Nov)"))
 
 N_WORLD = len(WORLD) if WORLD is not None else 4553
 TOP = add_novelty(TOP)
 WORLD = add_novelty(WORLD)
+CLAY_MAX = float(TOP["ratio_argiles"].max()) if "ratio_argiles" in TOP.columns and TOP["ratio_argiles"].max() > 1 else 1.27
 TOP = add_use_cases(TOP)
 
 # ----------------------------------------------------------------------------
@@ -2455,13 +2498,29 @@ elif page.startswith("3"):
                 "test, a different site wins. Every score below comes from the satellite measurements of each site.</p>",
                 unsafe_allow_html=True)
 
+    # Field filter (applies to every experiment)
+    f1, f2, f3 = st.columns([1, 1, 1.4])
+    no_dis = f1.checkbox("Exclude disputed territories", value=True)
+    no_pro = f2.checkbox("Exclude protected areas", value=False)
+    max_h = f3.slider("Max travel time from a city (h)", 2, 48, 48) if "acces_heures" in TOP.columns else 48
+    pool = TOP
+    if no_dis:
+        pool = pool[pool["status"] != "disputed"]
+    if no_pro:
+        pool = pool[pool["status"] != "protected"]
+    if max_h < 48:
+        pool = pool[pool["acces_heures"] <= max_h]
+
     # 1. Use case ranking
-    uc = st.radio("Use case", list(USE_CASES), format_func=lambda c: USE_CASES[c][0], horizontal=True)
+    uc = st.radio("Experiment", list(USE_CASES), format_func=lambda c: USE_CASES[c][0], horizontal=True)
     label, parts, why = USE_CASES[uc]
+    req = REQUIREMENTS.get(uc)
     st.markdown(f"<div class='stage'><b>{label}</b>: {why}.<br><span style='color:#9aa4b1'>Score = "
-                + " + ".join(f"{w:.0%} {METRIC_LABELS[c]}" for c, w in parts.items()) + "</span></div>",
-                unsafe_allow_html=True)
-    best = TOP.sort_values(uc, ascending=False).head(15).iloc[::-1]
+                + " + ".join(f"{w:.0%} {METRIC_LABELS[c]}" for c, w in parts.items())
+                + (f"<br>Required: {req[0]}" if req else "")
+                + f"<br><i>Limit: {UC_LIMITS[uc]}</i></span></div>", unsafe_allow_html=True)
+    ranked = pool[req[1](pool)] if req else pool
+    best = ranked.sort_values(uc, ascending=False).head(15).iloc[::-1]
     fig = go.Figure(go.Bar(
         x=best[uc] * 100, orientation="h",
         y=[f"#{r} · {t}" + (" ★" if r == RECOMMENDED else "") for r, t in zip(best["rang"], best.get("territoire", [""] * len(best)))],
@@ -2471,13 +2530,19 @@ elif page.startswith("3"):
         hovertemplate="%{y}: %{x:.0f}/100<extra></extra>"))
     fig.update_xaxes(range=[0, 108], title=f"{label} (/100)")
     st.plotly_chart(plot_dark(fig, height=520), use_container_width=True)
-    pos4 = int((TOP[uc] > TOP.loc[TOP["rang"] == RECOMMENDED, uc].max()).sum()) + 1 if RECOMMENDED in set(TOP["rang"]) else None
-    st.caption("Top 15 of the top 100 for this use. Colour = field status (green accessible, orange protected, "
-               "red disputed); white outline = priority target."
-               + (f" Site #4 ranks {pos4} of 100 for this use." if pos4 else ""))
+    if RECOMMENDED in set(ranked["rang"]):
+        pos4 = int((ranked[uc] > ranked.loc[ranked["rang"] == RECOMMENDED, uc].max()).sum()) + 1
+        msg4 = f" Site #4 ranks {pos4} of {len(ranked)} for this experiment."
+    elif RECOMMENDED in set(pool["rang"]) and req:
+        msg4 = f" Site #4 does not meet the requirement ({req[0]})."
+    else:
+        msg4 = " Site #4 is excluded by the filter above."
+    st.caption(f"Top 15 of the {len(ranked)} sites that pass the filter"
+               + (" and the requirement" if req else "") + ". Colour = field status (green accessible, orange protected, "
+               "red disputed); white outline = priority target." + msg4)
 
     # 2. Heatmap: sites x use cases
-    st.markdown("### Every use case at a glance")
+    st.markdown("### Every experiment at a glance")
     default = sorted(set(TOP.nsmallest(10, "rang")["rang"]) | set(TOP.loc[TOP["priority"], "rang"]))
     picks = st.multiselect("Sites", sorted(TOP["rang"]), default=default, format_func=lambda r: f"#{r}")
     sub = TOP[TOP["rang"].isin(picks)].sort_values("rang")
@@ -2525,7 +2590,7 @@ elif page.startswith("3"):
 - **Day–night swing**: 10 K → 35 K
 - **Dryness**: aridity index 0.65 → 0.03
 - **Flatness**: mean slope 5° → 0°
-- **Clay signal**: clay ratio 1.00 → 1.27
+- **Clay signal**: clay ratio 1.00 → best ratio of the top 100
 - **Access**: 24 h → 2 h from the nearest city
 """)
         st.caption("Even the best sites never reach 1 on the day–night swing: Jezero's ≈ 87 K is out of reach on Earth.")
@@ -2555,14 +2620,14 @@ elif page.startswith("3"):
     sc.update_layout(xaxis_title=RAW[xk], yaxis_title=RAW[yk])
     st.plotly_chart(plot_dark(sc, height=420), use_container_width=True)
 
-    with st.expander("Use-case scores for all 100 sites (table)"):
+    with st.expander("Experiment scores for all 100 sites (table)"):
         t = TOP.sort_values("rang")[["rang"] + (["territoire"] if "territoire" in TOP.columns else []) + list(USE_CASES)].copy()
         for c in USE_CASES:
             t[c] = (t[c] * 100).round(0)
         t = t.rename(columns={"rang": "Rank", "territoire": "Country", **{c: USE_CASES[c][0] for c in USE_CASES}})
         st.dataframe(t, hide_index=True, use_container_width=True)
         st.download_button("Download (CSV)", t.to_csv(index=False).encode("utf-8"), "use_case_scores.csv", "text/csv")
-    st.caption("Use-case weights are team choices, made to be transparent rather than optimal. "
+    st.caption("Experiment weights are team choices, made to be transparent rather than optimal. "
                "Sub-scores reuse the model's own thresholds where they exist.")
 
 # ----------------------------------------------------------------------------
@@ -2619,7 +2684,7 @@ else:
          "yes" if rk == RECOMMENDED else "part"),
         ("Clays", "Clays in the delta sediments",
          f"Clay signal: {escape(clay_en(clay))}" + (f" (ratio {ratio:.2f}, ASTER)" if ratio is not None else ""),
-         "part" if clay.lower().startswith(("moyen", "fort")) else "no"),
+         "part" if clay.lower().startswith(("moyen", "fort", "moderate", "strong")) else "no"),
         ("Rock", "Olivine-rich and basaltic (mafic) floor",
          f"Mafic index score {g('compo_moy'):.2f} (ASTER)" if g("compo_moy") is not None else "—",
          "yes" if (g("compo_moy") or 0) >= 0.7 else "part"),
