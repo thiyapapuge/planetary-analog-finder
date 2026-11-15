@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_folium import st_folium
 
 # =====================================================================================================
@@ -1823,6 +1824,238 @@ def clay_en(v) -> str:
     return CLAY_EN.get(v.lower(), v)
 
 
+# ---- Rotating Mars globe (three.js in an HTML component) ------------------------------------
+JEZERO_LATLON = (18.4, 77.5)   # Jezero crater, approximate centre
+MARS_TILES = ("https://trek.nasa.gov/tiles/Mars/EQ/Mars_Viking_MDIM21_ClrMosaic_global_232m/1.0.0//default/"
+              "default028mm/{z}/{y}/{x}.jpg")   # NASA Mars Trek, Viking colour mosaic (equirectangular, 2x1 tiles at z0)
+
+MARS_GLOBE_HTML = r"""
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;height:100%;background:#05070b;overflow:hidden;font-family:"Source Sans Pro",Arial,sans-serif;color:#d0d6de}
+  #wrap{position:relative;width:100%;height:100%}
+  canvas{display:block;cursor:grab}
+  #label{display:none;position:absolute;pointer-events:auto;cursor:pointer;transform:translate(14px,-50%);white-space:nowrap;
+         background:#05070be6;border:1px solid #f2b134;color:#fff;font-weight:600;font-size:13px;padding:4px 8px}
+  #label span{display:block;font-weight:400;font-size:11px;color:#c9d1d9}
+  #hint{position:absolute;left:10px;bottom:8px;font-size:12px;color:#7d8590}
+  #openbtn{position:absolute;left:10px;top:10px;background:#0b0f15;color:#f2b134;border:1px solid #f2b134;
+           padding:5px 10px;cursor:pointer;font-size:13px}
+  #panel{position:absolute;inset:0;background:#05070bf2;display:none;flex-direction:column;align-items:center;
+         justify-content:center;padding:14px;box-sizing:border-box}
+  #panel img{max-width:100%;max-height:82%;border:1px solid #1f2937}
+  #panel p{font-size:12px;color:#9aa4b1;margin:8px 0 0;text-align:center}
+  #panel a{color:#4fc3f7}
+  #close{position:absolute;top:8px;right:10px;background:#0b0f15;color:#fff;border:1px solid #30363d;
+         padding:4px 10px;cursor:pointer;font-size:13px}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+ "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body><div id="wrap">
+  <div id="label">● Jezero crater<span>Click to see it from orbit</span></div>
+  <div id="hint">Drag to rotate · scroll to zoom · click Jezero</div>
+  <button id="openbtn">View Jezero from orbit</button>
+  <div id="panel"><button id="close">✕ Back to the globe</button>
+    <img src="__IMG__" alt="Jezero crater seen from orbit, with its delta coloured by minerals">
+    <p>Jezero crater from orbit (NASA Mars Reconnaissance Orbiter, CRISM + CTX). Colours show minerals: the delta is rich
+       in clays and carbonates. Credit: <a href="__SRC__" target="_blank">NASA/JPL-Caltech/MSSS/JHU-APL, PIA23239</a></p>
+  </div>
+</div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+const LAT = __LAT__, LON = __LON__, TILES = "__TILES__";
+const wrap = document.getElementById("wrap"), label = document.getElementById("label");
+const panel = document.getElementById("panel");
+const W = () => wrap.clientWidth, H = () => wrap.clientHeight;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W(), H());
+wrap.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, W() / H(), 0.1, 100);
+camera.position.set(0, 0.6, 3.4);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(-3, 2, 4); scene.add(sun);
+
+// Stars
+const sg = new THREE.BufferGeometry(), sp = [];
+for (let i = 0; i < 900; i++) { const v = new THREE.Vector3().randomDirection().multiplyScalar(30 + Math.random() * 20); sp.push(v.x, v.y, v.z); }
+sg.setAttribute("position", new THREE.Float32BufferAttribute(sp, 3));
+scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0x8b949e, size: 0.08 })));
+
+// Mars
+const mars = new THREE.Group(); scene.add(mars);
+const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
+mars.add(new THREE.Mesh(new THREE.SphereGeometry(1, 96, 64), mat));
+
+function procedural() {          // fallback texture if NASA tiles cannot load
+  const c = document.createElement("canvas"); c.width = 1024; c.height = 512; const g = c.getContext("2d");
+  g.fillStyle = "#b5532e"; g.fillRect(0, 0, 1024, 512);
+  for (let i = 0; i < 2600; i++) {
+    const x = Math.random() * 1024, y = Math.random() * 512, r = 2 + Math.random() * 26;
+    g.fillStyle = `rgba(${90 + Math.random() * 110},${40 + Math.random() * 50},${20 + Math.random() * 30},${0.08 + Math.random() * 0.2})`;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  g.fillStyle = "rgba(240,235,230,0.7)"; g.fillRect(0, 0, 1024, 18); g.fillRect(0, 494, 1024, 18);
+  return c;
+}
+function setTexture(canvas) {
+  const t = new THREE.CanvasTexture(canvas); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4;
+  mat.map = t; mat.needsUpdate = true;
+}
+setTexture(procedural());
+
+// NASA Mars Trek tiles (zoom 2 = 8 x 4 tiles) stitched into one equirectangular texture
+(function loadTrek() {
+  const z = 2, nx = 8, ny = 4, size = 256;
+  const c = document.createElement("canvas"); c.width = nx * size; c.height = ny * size; const g = c.getContext("2d");
+  let done = 0, failed = false;
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const im = new Image(); im.crossOrigin = "anonymous";
+    im.onload = () => { g.drawImage(im, x * size, y * size, size, size); finish(); };
+    im.onerror = () => { failed = true; finish(); };
+    im.src = TILES.replace("{z}", z).replace("{y}", y).replace("{x}", x);
+  }
+  function finish() {
+    if (++done < nx * ny || failed) return;
+    try { g.getImageData(0, 0, 1, 1); setTexture(c); document.getElementById("hint").textContent += " · imagery: NASA Mars Trek (Viking)"; }
+    catch (e) { /* tiles not shareable with WebGL: keep the fallback */ }
+  }
+})();
+
+// Jezero marker: dot + pulsing ring, on the surface
+function toVec(lat, lon, r) {
+  const phi = (90 - lat) * Math.PI / 180, th = (lon + 180) * Math.PI / 180;
+  return new THREE.Vector3(-r * Math.sin(phi) * Math.cos(th), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(th));
+}
+const pos = toVec(LAT, LON, 1.005), normal = pos.clone().normalize();
+const dot = new THREE.Mesh(new THREE.SphereGeometry(0.028, 16, 12), new THREE.MeshBasicMaterial({ color: 0xf2b134 }));
+dot.position.copy(pos); mars.add(dot);
+const ring = new THREE.Mesh(new THREE.RingGeometry(0.045, 0.06, 40),
+  new THREE.MeshBasicMaterial({ color: 0xf2b134, transparent: true, side: THREE.DoubleSide }));
+ring.position.copy(toVec(LAT, LON, 1.008)); ring.lookAt(normal.clone().multiplyScalar(2)); mars.add(ring);
+
+// Start with Jezero facing the camera, then rotate slowly
+mars.rotation.y = -Math.atan2(pos.x, pos.z);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.minDistance = 1.6; controls.maxDistance = 6; controls.enablePan = false;
+let hovering = false, spinning = true;
+renderer.domElement.addEventListener("pointerdown", () => { spinning = false; });
+renderer.domElement.addEventListener("pointerup", () => { setTimeout(() => { spinning = true; }, 2500); });
+
+// Click on the marker (or its label) opens the NASA image
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+let downAt = null;
+renderer.domElement.addEventListener("pointerdown", e => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener("pointerup", e => {
+  if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  if (ray.intersectObjects([dot, ring]).length) open();
+});
+renderer.domElement.addEventListener("pointermove", e => {
+  const r = renderer.domElement.getBoundingClientRect();
+  mouse.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  hovering = ray.intersectObjects([dot, ring]).length > 0;
+  renderer.domElement.style.cursor = hovering ? "pointer" : "grab";
+});
+label.addEventListener("click", open);
+label.addEventListener("mouseenter", () => { hovering = true; });
+label.addEventListener("mouseleave", () => { hovering = false; });
+document.getElementById("openbtn").addEventListener("click", open);
+function open() { panel.style.display = "flex"; }
+document.getElementById("close").addEventListener("click", () => { panel.style.display = "none"; });
+
+const tmp = new THREE.Vector3(), clock = new THREE.Clock();
+function frame() {
+  const t = clock.getElapsedTime();
+  if (spinning && !hovering && panel.style.display !== "flex") mars.rotation.y += 0.0025;
+  const s = 1 + 0.35 * (0.5 + 0.5 * Math.sin(t * 3)); ring.scale.set(s, s, s);
+  ring.material.opacity = 0.9 - 0.5 * (0.5 + 0.5 * Math.sin(t * 3));
+  controls.update();
+  // label follows the marker; hidden when Jezero is on the far side
+  dot.getWorldPosition(tmp);
+  const facing = tmp.clone().normalize().dot(camera.position.clone().normalize()) > 0.15;
+  const p = tmp.clone().project(camera);
+  label.style.display = facing ? "block" : "none";
+  label.style.left = ((p.x + 1) / 2 * W()) + "px"; label.style.top = ((1 - p.y) / 2 * H()) + "px";
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+frame();
+window.addEventListener("resize", () => { camera.aspect = W() / H(); camera.updateProjectionMatrix(); renderer.setSize(W(), H()); });
+</script></body></html>
+"""
+
+
+def mars_globe_html() -> str:
+    return (MARS_GLOBE_HTML.replace("__IMG__", JEZERO_IMG).replace("__SRC__", SRC["pia23239"][1])
+            .replace("__LAT__", str(JEZERO_LATLON[0])).replace("__LON__", str(JEZERO_LATLON[1]))
+            .replace("__TILES__", MARS_TILES))
+
+
+# Featured new sites for the Jezero comparison (page 4)
+ZAGROS_BOX = (27.0, 35.0, 46.0, 54.5)    # lat min, lat max, lon min, lon max: Zagros mountains, Iran
+
+
+def best_zagros(df):
+    z = df[(df["lat"].between(ZAGROS_BOX[0], ZAGROS_BOX[1])) & (df["lon"].between(ZAGROS_BOX[2], ZAGROS_BOX[3]))]
+    return int(z.sort_values("rang")["rang"].iloc[0]) if len(z) else None
+
+
+FEATURED_FIXED = [4, 68, 83]
+
+
+def featured_label(rk) -> str:
+    r = TOP[TOP["rang"] == rk]
+    t = str(r["territoire"].iloc[0]) if len(r) and "territoire" in r.columns else ""
+    extra = {4: "Puna, ", ZAGROS_BEST: "Zagros, "}.get(rk, "")
+    return f"#{rk} · {extra}{t}"
+
+
+def jezero_compare(r):
+    """Rows (dimension, Jezero, this site, verdict) and the Jezero match score /100 for one Earth site."""
+    g = lambda c: r[c] if c in r.index and pd.notna(r[c]) else None
+    rk = int(r["rang"])
+    morph = str(r.get("morphotype", "") or "")
+    clay = str(r.get("signal_argiles", "") or "").lower()
+    ratio, cm, sl, rl, nd, ar = (g(c) for c in ("ratio_argiles", "compo_moy", "pente_moy_deg", "relief_local_m", "ndvi_max", "aridite"))
+    sw, t = g("amplitude_k"), g("temp_moy_c")
+    rel = None if rl is None else float(np.clip(min((rl - 20) / 80, 1, (1500 - rl) / 1000), 0, 1))
+    rows = [
+        ("Basin", "45 km impact crater that held a lake", escape(morph) or "—",
+         "yes" if "jezero" in morph.lower() else "part" if morph else "info"),
+        ("Past water", "Ancient lake and river delta",
+         "Closed basin where a lake dried out, leaving a salt flat (Sentinel-2)" if rk == 4 else "Not observed yet", "info"),
+        ("Clays", "Clays in the delta sediments",
+         f"Clay signal: {escape(clay or '—')}" + (f" (ratio {ratio:.2f}, ASTER)" if ratio is not None else ""),
+         "part" if clay.startswith(("moderate", "strong", "moyen", "fort")) else "no"),
+        ("Rock", "Olivine-rich and basaltic (mafic) floor", f"Mafic index score {cm:.2f} (ASTER)" if cm is not None else "—",
+         "yes" if (cm or 0) >= 0.7 else "part" if (cm or 0) >= 0.4 else "no"),
+        ("Floor", "Flat crater floor", f"Mean slope {sl:.1f}°" if sl is not None else "—",
+         "yes" if sl is not None and sl < 2 else "part" if sl is not None and sl < 5 else "no"),
+        ("Relief", "Crater rim around the floor", f"Local relief {rl:.0f} m within 3 km" if rl is not None else "—",
+         "yes" if (rel or 0) >= 0.8 else "part" if (rel or 0) >= 0.4 else "no"),
+        ("Water today", "None at the surface",
+         f"Max NDVI {nd:.2f}, aridity index {ar:.3f}" if nd is not None and ar is not None else "—",
+         "yes" if ar is not None and ar <= 0.05 else "part" if ar is not None and ar <= 0.2 else "no"),
+        ("Daily swing", "Ground swings by ≈ 56 to 87 K",
+         f"{sw:.0f} K ({sw / JEZERO_SWING_K:.0%} of Jezero's)" if sw is not None else "—", "no"),
+        ("Temperature", "Far below freezing on average", f"Mean surface {t:.1f} °C" if t is not None else "—",
+         "part" if t is not None and t <= -15 else "no"),
+        ("Gravity, air, radiation", "0.38 g, ≈ 6.4 hPa CO₂, no magnetic shield", "1 g, ≈ 1,000 hPa, magnetic field", "info"),
+    ]
+    pts = {"yes": 1.0, "part": 0.5, "no": 0.0}
+    scored = [pts[v] for *_, v in rows if v in pts]
+    return rows, (100 * sum(scored) / len(scored) if scored else 0.0)
+
+
 def sources_md(keys):
     return " · ".join(f"[{SRC[k][0]}]({SRC[k][1]})" for k in keys)
 
@@ -2125,6 +2358,299 @@ def page_title(text: str):
     st.markdown(f"<h2 style='margin-bottom:0.2rem'>{icon}{escape(text)}</h2>", unsafe_allow_html=True)
 
 
+# ---- 3D Earth globe for page 1 (three.js), with a tactical callout pop-up on click ------------------
+EARTH_GLOBE_HTML = r"""
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;height:100%;background:#05070b;overflow:hidden;font-family:"Source Sans Pro",Arial,sans-serif;color:#d0d6de}
+  #wrap{position:relative;width:100%;height:100%}
+  canvas{display:block;cursor:grab}
+  #tip{position:absolute;display:none;pointer-events:none;background:#05070be6;border:1px solid #30363d;color:#fff;
+       font:600 12px "Courier New",monospace;padding:3px 7px;white-space:nowrap;transform:translate(12px,-120%)}
+  #hint{position:absolute;left:10px;bottom:8px;font-size:12px;color:#7d8590}
+  #hud{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible}
+  #line{fill:none;stroke:#f2b134;stroke-width:1.6;stroke-dasharray:400;stroke-dashoffset:400}
+  #line.on{animation:draw .35s ease-out forwards}
+  @keyframes draw{to{stroke-dashoffset:0}}
+  #anchor{fill:none;stroke:#f2b134;stroke-width:1.6}
+  #box{position:absolute;display:none;width:300px;pointer-events:auto;background:rgba(5,7,11,.93);
+       border:1px solid rgba(242,177,52,.55);color:#e6e6e6;font:12px "Courier New",monospace;
+       box-shadow:0 0 18px rgba(242,177,52,.18);opacity:0;transform:translateY(6px);transition:opacity .25s,transform .25s}
+  #box.on{opacity:1;transform:none}
+  #box:before,#box:after{content:"";position:absolute;width:12px;height:12px;border:2px solid #f2b134}
+  #box:before{left:-3px;top:-3px;border-right:none;border-bottom:none}
+  #box:after{right:-3px;bottom:-3px;border-left:none;border-top:none}
+  #box .hd{display:flex;justify-content:space-between;align-items:center;background:#f2b134;color:#05070b;
+           font-weight:700;letter-spacing:2px;padding:5px 8px;text-transform:uppercase}
+  #box .hd button{background:none;border:none;color:#05070b;font:700 13px monospace;cursor:pointer;padding:0 2px}
+  #box .sub{padding:6px 10px 2px;color:#f2b134;letter-spacing:1px;text-transform:uppercase;font-size:11px}
+  #box table{width:100%;border-collapse:collapse;margin:2px 0 4px}
+  #box td{padding:3px 10px;border-bottom:1px solid #1f2937;vertical-align:top}
+  #box td:first-child{color:#8b949e;text-transform:uppercase;font-size:10.5px;letter-spacing:1px;width:44%}
+  #box .ft{padding:5px 10px 7px;color:#7d8590;font-size:10.5px;letter-spacing:1px}
+  .ok{color:#2e9e5b}.warn{color:#ff9900}.bad{color:#e03b2e}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+ "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body><div id="wrap">
+  <svg id="hud"><polyline id="line"/><circle id="anchor" r="7" style="display:none"/></svg>
+  <div id="box"></div><div id="tip"></div>
+  <div id="hint">Drag to rotate · scroll to zoom · click a site</div>
+</div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+const D = __DATA__;
+const wrap = document.getElementById("wrap"), box = document.getElementById("box"), tip = document.getElementById("tip");
+const line = document.getElementById("line"), anchor = document.getElementById("anchor");
+const W = () => wrap.clientWidth, H = () => wrap.clientHeight;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); renderer.setSize(W(), H());
+wrap.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, W() / H(), 0.1, 100); camera.position.set(0, 0.5, 3.3);
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+const sun = new THREE.DirectionalLight(0xffffff, 0.9); sun.position.set(-3, 2, 4); scene.add(sun);
+const sg = new THREE.BufferGeometry(), sp = [];
+for (let i = 0; i < 900; i++) { const v = new THREE.Vector3().randomDirection().multiplyScalar(30 + Math.random() * 20); sp.push(v.x, v.y, v.z); }
+sg.setAttribute("position", new THREE.Float32BufferAttribute(sp, 3));
+scene.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: 0x8b949e, size: 0.08 })));
+
+const earth = new THREE.Group(); scene.add(earth);
+const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
+earth.add(new THREE.Mesh(new THREE.SphereGeometry(1, 128, 96), mat));
+
+function setTexture(c) { const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; mat.map = t; mat.needsUpdate = true; }
+(function graticule() {          // fallback: dark sphere with a lat/lon grid
+  const c = document.createElement("canvas"); c.width = 2048; c.height = 1024; const g = c.getContext("2d");
+  g.fillStyle = "#1b2433"; g.fillRect(0, 0, 2048, 1024); g.strokeStyle = "rgba(160,170,185,.25)"; g.lineWidth = 1;
+  for (let x = 0; x <= 2048; x += 2048 / 24) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, 1024); g.stroke(); }
+  for (let y = 0; y <= 1024; y += 1024 / 12) { g.beginPath(); g.moveTo(0, y); g.lineTo(2048, y); g.stroke(); }
+  setTexture(c);
+})();
+// Esri Web-Mercator tiles (zoom 3 = 8 x 8) re-projected row by row into an equirectangular texture
+(function loadTiles() {
+  const z = 3, n = 8, ts = 256, M = n * ts;
+  const merc = document.createElement("canvas"); merc.width = M; merc.height = M; const mg = merc.getContext("2d");
+  let done = 0, failed = false;
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const im = new Image(); im.crossOrigin = "anonymous";
+    im.onload = () => { mg.drawImage(im, x * ts, y * ts); fin(); };
+    im.onerror = () => { failed = true; fin(); };
+    im.src = D.tiles.replace("{z}", z).replace("{y}", y).replace("{x}", x);
+  }
+  function fin() {
+    if (++done < n * n || failed) return;
+    const out = document.createElement("canvas"); out.width = 2 * M; out.height = M; const og = out.getContext("2d");
+    og.fillStyle = D.pole; og.fillRect(0, 0, out.width, out.height);
+    for (let y = 0; y < out.height; y++) {
+      const lat = 90 - 180 * (y + 0.5) / out.height;
+      if (Math.abs(lat) > 85.05) continue;
+      const r = lat * Math.PI / 180, my = (1 - Math.log(Math.tan(Math.PI / 4 + r / 2)) / Math.PI) / 2 * M;
+      og.drawImage(merc, 0, Math.floor(my), M, 1, 0, y, out.width, 1);
+    }
+    try { og.getImageData(0, 0, 1, 1); setTexture(out); } catch (e) { /* tiles not shareable with WebGL: keep the grid */ }
+  }
+})();
+
+function toVec(lat, lon, r) {
+  const phi = (90 - lat) * Math.PI / 180, th = (lon + 180) * Math.PI / 180;
+  return new THREE.Vector3(-r * Math.sin(phi) * Math.cos(th), r * Math.cos(phi), r * Math.sin(phi) * Math.sin(th));
+}
+// Points: candidates, top 100, priority, known analogs
+const groups = [];
+function addPoints(list, color, size, opacity) {
+  if (!list.length) return;
+  const g = new THREE.BufferGeometry(), p = [];
+  list.forEach(s => { const v = toVec(s.la, s.lo, 1.004); p.push(v.x, v.y, v.z); });
+  g.setAttribute("position", new THREE.Float32BufferAttribute(p, 3));
+  earth.add(new THREE.Points(g, new THREE.PointsMaterial({ color, size, sizeAttenuation: false, transparent: true, opacity, depthWrite: false })));
+  groups.push(list);
+}
+addPoints(D.world, 0x6f8fb8, 3, D.stage === 1 ? 0.85 : 0.45);
+addPoints(D.top, 0xf2b134, 6, 0.95);
+const rings = [];
+D.prio.forEach(s => {
+  const col = s.rec ? 0xf2b134 : 0x4fc3f7, v = toVec(s.la, s.lo, 1.006);
+  const dot = new THREE.Mesh(new THREE.SphereGeometry(s.rec ? 0.016 : 0.012, 12, 10), new THREE.MeshBasicMaterial({ color: col }));
+  dot.position.copy(v); earth.add(dot);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.025, 0.033, 40), new THREE.MeshBasicMaterial({ color: col, transparent: true, side: THREE.DoubleSide }));
+  ring.position.copy(toVec(s.la, s.lo, 1.008)); ring.lookAt(v.clone().multiplyScalar(2)); earth.add(ring); rings.push(ring);
+});
+D.known.forEach(s => {
+  const m = new THREE.Mesh(new THREE.ConeGeometry(0.013, 0.03, 3), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  const v = toVec(s.la, s.lo, 1.012); m.position.copy(v); m.lookAt(v.clone().multiplyScalar(2)); m.rotateX(Math.PI / 2); earth.add(m);
+});
+const pickable = [...D.prio.map(s => ({ ...s, kind: "prio" })), ...D.known.map(s => ({ ...s, kind: "known" })),
+                  ...D.top.map(s => ({ ...s, kind: "top" })), ...D.world.map(s => ({ ...s, kind: "world" }))];
+pickable.forEach(s => { s.v = toVec(s.la, s.lo, 1.004); });
+
+const f = toVec(D.face[0], D.face[1], 1); earth.rotation.y = -Math.atan2(f.x, f.z);
+{ const a = D.face[0] * Math.PI / 180, R = 3.3; camera.position.set(0, R * Math.sin(a), R * Math.cos(a)); camera.lookAt(0, 0, 0); }
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.minDistance = 1.35; controls.maxDistance = 6; controls.enablePan = false;
+let spinning = D.stage > 0, sel = null, downAt = null;
+
+const tmp = new THREE.Vector3();
+function screenOf(s) {
+  tmp.copy(s.v).applyMatrix4(earth.matrixWorld);
+  const facing = tmp.clone().normalize().dot(camera.position.clone().normalize()) > 0.12;
+  const p = tmp.clone().project(camera);
+  return { x: (p.x + 1) / 2 * W(), y: (1 - p.y) / 2 * H(), facing };
+}
+function pick(mx, my) {
+  let best = null, bd = 1e9;
+  const pri = { prio: 0, known: 1, top: 2, world: 3 };
+  for (const s of pickable) {
+    const q = screenOf(s); if (!q.facing) continue;
+    const d = Math.hypot(q.x - mx, q.y - my) + pri[s.kind] * 3;
+    if (d < bd && Math.hypot(q.x - mx, q.y - my) < 10) { bd = d; best = s; }
+  }
+  return best;
+}
+const L = k => (k === undefined || k === null) ? "" : D.lut[k];
+function nvText(n) {
+  if (!n) return "";
+  const lab = D.nvl[n[0]], name = D.kn[n[1]];
+  return n[0] === "known" ? `${lab}: inside the ${name} area` : `${lab}: ${n[2].toLocaleString("en")} km from ${name}`;
+}
+const esc = t => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function row(k, v, cls) { return v === undefined || v === null || v === "" ? "" : `<tr><td>${k}</td><td class="${cls || ""}">${esc(v)}</td></tr>`; }
+function render(s) {
+  if (s.kind === "known") {
+    return `<div class="hd"><span>Known analog</span><button id="x">✕</button></div><div class="sub">${esc(s.name)}</div>
+      <table>${row("Status", "Well-known Mars analog site")}${row("Use", "Reference: the model is checked against these")}</table>
+      <div class="ft">LAT ${s.la.toFixed(2)} · LON ${s.lo.toFixed(2)}</div>`;
+  }
+  const st = { ok: ["Accessible", "ok"], protected: ["Protected area", "warn"], disputed: ["Disputed territory", "bad"] }[s.st] || null;
+  return `<div class="hd"><span>Site #${s.r}${s.c ? " // " + esc(s.c) : ""}</span><button id="x">✕</button></div>
+    <div class="sub">${s.rec ? "★ Recommended site" : s.kind === "prio" ? "Priority target · clay signal" : s.kind === "top" ? "Top 100 site" : "Candidate site"}</div>
+    <table>${row("Similarity score", s.s != null ? s.s.toFixed(0) + " / 100" : "")}${row("Profile", L(s.pf))}
+    ${row("Setting", L(s.ty))}${row("Landform", L(s.mo))}${row("Novelty", nvText(s.nv))}
+    ${row("Day–night swing", s.sw != null ? s.sw.toFixed(0) + " K (" + Math.round(100 * s.sw / 87) + "% of Jezero)" : "")}
+    ${row("Mean temperature", s.t != null ? s.t.toFixed(1) + " °C" : "")}${row("Max NDVI", s.nd != null ? s.nd.toFixed(2) : "")}
+    ${row("Aridity index", s.ar != null ? s.ar.toFixed(3) : "")}${row("Mean slope", s.sl != null ? s.sl.toFixed(1) + "°" : "")}
+    ${row("Local relief", s.rl != null ? Math.round(s.rl) + " m" : "")}${row("Clay signal", L(s.cl))}
+    ${row("Access", s.ah != null ? s.ah.toFixed(1) + " h from a city" : "")}${st ? row("Field status", st[0] + (s.pa ? " · " + s.pa : ""), st[1]) : ""}</table>
+    <div class="ft">LAT ${s.la.toFixed(3)} · LON ${s.lo.toFixed(3)}</div>`;
+}
+function openBox(s) {
+  sel = s; spinning = false; tip.style.display = "none";
+  box.innerHTML = render(s); box.style.display = "block"; requestAnimationFrame(() => box.classList.add("on"));
+  line.classList.remove("on"); void line.getBBox(); line.classList.add("on");
+  document.getElementById("x").onclick = closeBox;
+}
+function closeBox() { sel = null; box.classList.remove("on"); box.style.display = "none"; line.setAttribute("points", ""); anchor.style.display = "none"; }
+function placeBox() {
+  if (!sel) return;
+  const q = screenOf(sel);
+  if (!q.facing) { box.style.visibility = "hidden"; line.style.visibility = "hidden"; anchor.style.display = "none"; return; }
+  box.style.visibility = "visible"; line.style.visibility = "visible";
+  const right = q.x < W() - 360, dx = right ? 1 : -1;
+  const ex = q.x + dx * 46, ey = Math.max(30, q.y - 46), bx = ex + dx * 34;
+  const bh = box.offsetHeight, top = Math.min(Math.max(8, ey - 14), H() - bh - 8);
+  line.setAttribute("points", `${q.x},${q.y} ${ex},${ey} ${bx},${ey}`);
+  anchor.setAttribute("cx", q.x); anchor.setAttribute("cy", q.y); anchor.style.display = "block";
+  box.style.left = (right ? bx : bx - 300) + "px"; box.style.top = top + "px";
+}
+const cv = renderer.domElement;
+cv.addEventListener("pointerdown", e => { downAt = [e.clientX, e.clientY]; spinning = false; });
+cv.addEventListener("pointerup", e => {
+  const r = cv.getBoundingClientRect();
+  if (downAt && Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) < 5) {
+    const s = pick(e.clientX - r.left, e.clientY - r.top);
+    if (s) openBox(s); else closeBox();
+  }
+  if (!sel) setTimeout(() => { if (!sel) spinning = D.stage > 0; }, 2500);
+});
+cv.addEventListener("pointermove", e => {
+  const r = cv.getBoundingClientRect(), s = pick(e.clientX - r.left, e.clientY - r.top);
+  cv.style.cursor = s ? "pointer" : "grab";
+  if (s && !sel) { tip.style.display = "block"; tip.style.left = (e.clientX - r.left) + "px"; tip.style.top = (e.clientY - r.top) + "px";
+    tip.textContent = s.kind === "known" ? "▲ " + s.name : "#" + s.r + (s.c ? " · " + s.c : ""); }
+  else tip.style.display = "none";
+});
+const clock = new THREE.Clock();
+(function frame() {
+  const t = clock.getElapsedTime();
+  if (spinning) earth.rotation.y += 0.0018;
+  rings.forEach(r => { const k = 1 + 0.4 * (0.5 + 0.5 * Math.sin(t * 3)); r.scale.set(k, k, k); r.material.opacity = 0.9 - 0.5 * (0.5 + 0.5 * Math.sin(t * 3)); });
+  controls.update(); earth.updateMatrixWorld(); placeBox();
+  renderer.render(scene, camera); requestAnimationFrame(frame);
+})();
+window.addEventListener("resize", () => { camera.aspect = W() / H(); camera.updateProjectionMatrix(); renderer.setSize(W(), H()); });
+</script></body></html>
+"""
+
+BASEMAP_POLE = {"Dark": "#1c1c1c", "Satellite": "#e8eef2", "Relief": "#f2f2f2"}
+
+
+def _num(v, nd=None):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return round(float(v), nd) if nd is not None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+_LUT = []
+
+
+def _lut(text):
+    """Index of a repeated text in the lookup list sent to the globe (keeps the page small)."""
+    if not text:
+        return None
+    if text not in _LUT:
+        _LUT.append(text)
+    return _LUT.index(text)
+
+
+def _site_json(r, kind_top=None):
+    g = lambda c: r[c] if c in r.index else None
+    d = {"r": int(r["rang"]), "la": round(float(r["lat"]), 3), "lo": round(float(r["lon"]), 3),
+         "s": _num(g("score"), 1), "pf": _lut(str(g("profil") or "")), "ty": _lut(str(g("typologie") or "")),
+         "mo": _lut(str(g("morphotype") or "")), "sw": _num(g("amplitude_k"), 1), "t": _num(g("temp_moy_c"), 1),
+         "nd": _num(g("ndvi_max"), 2), "ar": _num(g("aridite"), 3), "sl": _num(g("pente_moy_deg"), 1),
+         "rl": _num(g("relief_local_m"), 0), "cl": _lut(str(g("signal_argiles") or ""))}
+    if "novelty" in r.index and isinstance(r["novelty"], str):
+        d["nv"] = [r["novelty"], [k[0] for k in KNOWN_ANALOGS].index(r["nearest_known"]), int(r["dist_known_km"])]
+    if kind_top is not None:
+        d.update({"c": str(g("territoire") or ""), "ah": _num(g("acces_heures"), 1), "st": str(g("status") or ""),
+                  "pa": str(g("nom_aire_protegee") or "")})
+    return {k: v for k, v in d.items() if v not in (None, "")}
+
+
+@st.cache_data(show_spinner="Building the globe…", max_entries=12)
+def earth_globe_html(stage: int, basemap: str, _stamp: float = 0.0) -> str:
+    import json
+    top_ranks = set(TOP["rang"])
+    world, top, prio = [], [], []
+    if stage >= 1 and WORLD is not None:
+        for _, r in WORLD.iterrows():
+            if int(r["rang"]) in top_ranks and stage >= 2:
+                continue
+            rr = site_row(int(r["rang"])) if int(r["rang"]) in top_ranks else r
+            world.append(_site_json(rr, kind_top=True if int(r["rang"]) in top_ranks else None))
+    if stage >= 2 or (stage == 1 and WORLD is None):
+        for _, r in TOP.iterrows():
+            if not r["priority"]:
+                top.append(_site_json(site_row(int(r["rang"])), kind_top=True))
+    if stage >= 1:
+        for _, r in TOP[TOP["priority"]].iterrows():
+            d = _site_json(site_row(int(r["rang"])), kind_top=True)
+            d["rec"] = int(r["rang"]) == RECOMMENDED
+            prio.append(d)
+    known = [{"name": n, "la": la, "lo": lo} for n, la, lo, _ in KNOWN_ANALOGS] if stage >= 1 else []
+    rec = TOP[TOP["rang"] == RECOMMENDED]
+    face = [float(rec["lat"].iloc[0]), float(rec["lon"].iloc[0])] if stage == 3 and len(rec) else [30.0, 75.0]
+    data = {"stage": stage, "tiles": BASEMAPS[basemap][0], "pole": BASEMAP_POLE[basemap],
+            "kn": [k[0] for k in KNOWN_ANALOGS], "nvl": {k: v[0] for k, v in NOVELTY.items()}, "lut": _LUT,
+            "world": world, "top": top, "prio": prio, "known": known, "face": face}
+    return EARTH_GLOBE_HTML.replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/"))
+
+
 # ----------------------------------------------------------------------------
 # 4. NAVIGATION
 # ----------------------------------------------------------------------------
@@ -2145,14 +2671,14 @@ with st.sidebar:
                     "margin:0 0 18px 0' alt='Proteus Group'>", unsafe_allow_html=True)
     st.markdown("### Planetary Analog Finder")
     st.caption("Where on Earth looks like Jezero crater, Mars?")
-    page = st.radio("Page", ["1 · The model", "2 · Top 100 sites", "3 · Compare sites", "4 · Jezero vs site #4"],
+    page = st.radio("Page", ["1 · The model", "2 · Top 100 sites", "3 · Compare sites", "4 · Jezero vs new sites"],
                     label_visibility="collapsed")
     st.radio("Map background", list(BASEMAPS), horizontal=True, key="basemap")
     st.markdown("---")
     st.caption("NASA Space Apps Challenge 2026 · Team Proteus 2")
     st.markdown("<div style='font-size:0.85rem;color:#c9d1d9;line-height:1.6;margin:-0.4rem 0 0.8rem'>"
                 "Lilian JAO<br>Jaime SOUSA<br>Thiya PAPUGE<br>Emma TROTIGNON</div>", unsafe_allow_html=True)
-    st.caption("App version: v3.2 · 15 Nov 10:40")
+    st.caption("App version: v3.5 · 15 Nov 12:00")
     st.caption(f"Data: {TOP_FILE} · " + (FILE_WORLD if find_file(FILE_WORLD) is not None else "embedded world scan (14 Nov)"))
 
 N_WORLD = len(WORLD) if WORLD is not None else 4553
@@ -2160,6 +2686,8 @@ TOP = add_novelty(TOP)
 WORLD = add_novelty(WORLD)
 CLAY_MAX = float(TOP["ratio_argiles"].max()) if "ratio_argiles" in TOP.columns and TOP["ratio_argiles"].max() > 1 else 1.27
 TOP = add_use_cases(TOP)
+ZAGROS_BEST = best_zagros(TOP)
+FEATURED = FEATURED_FIXED + ([ZAGROS_BEST] if ZAGROS_BEST and ZAGROS_BEST not in FEATURED_FIXED else [])
 
 # ----------------------------------------------------------------------------
 # 5. PAGE 1 · THE MODEL
@@ -2171,6 +2699,7 @@ if page.startswith("1"):
                 unsafe_allow_html=True)
 
     STAGES = ["Before the model", f"After the model: {N_WORLD:,} sites", "Ranked: top 100", "Recommended targets"]
+    view3d = st.radio("Map view", ["Flat map", "3D globe"], horizontal=True, key="p1_view") == "3D globe"
     map_area = st.container()          # the map is drawn here, above the slider
     stage = st.select_slider("Filter: move the slider to run the model", options=STAGES, value=STAGES[1])
     i = STAGES.index(stage)
@@ -2192,41 +2721,55 @@ if page.startswith("1"):
 
     sel_key = "sel_p1"
     sel = st.session_state.get(sel_key)
-    if i == 0:
+    if i == 0 or view3d:
         sel = None
     with map_area:
         col_map, col_info = st.columns([2.3, 1]) if sel else (st.container(), None)
 
-    with col_map:
-        if i == 3:
-            focus = TOP[TOP["rang"] == 4]
-            center, zoom = ((focus.iloc[0]["lat"], focus.iloc[0]["lon"]), 4) if len(focus) else ((20, 10), 2)
-        else:
-            center, zoom = (20, 10), 2
-        m = base_map(center, zoom)
-        click_df = None
-        if i >= 1 and WORLD is not None:
-            add_points(m, WORLD, C_WORLD, 3, f"Candidate sites ({len(WORLD):,})", opacity=0.7 if i == 1 else 0.35)
-            click_df = WORLD
-        if i >= 2 or (i == 1 and WORLD is None):
-            add_points(m, TOP, C_TOP, 5, "Top 100", opacity=0.9)
-            click_df = TOP if WORLD is None else WORLD
-        if i >= 1:
-            add_known(m)
-            add_priority(m, TOP)
-        show_map(m, click_df, f"map_p1_{i}_{current_basemap()}", sel_key, height=620)
-        legend = []
-        if i >= 1:
-            legend.append(f"<span><span class='dot' style='background:{C_WORLD}'></span>Candidate site</span>")
-        if i >= 2 or (i == 1 and WORLD is None):
-            legend.append(f"<span><span class='dot' style='background:{C_TOP}'></span>Top 100</span>")
-        if i >= 1:
-            legend.append(f"<span><span class='dot' style='background:{C_TOP};border:2px solid #fff'></span>★ #4 Recommended site</span>")
-            legend.append("<span><span class='dot' style='background:#4fc3f7;border:2px solid #fff'></span>Priority target (clay signal)</span>")
-            legend.append("<span>▲ Well-known analog (Atacama, Utah, Qaidam…)</span>")
-        if legend:
-            st.markdown("<div class='legend'>" + "".join(legend) + "<span style='color:#7d8590'>Click a point to see the site</span></div>",
-                        unsafe_allow_html=True)
+    if view3d:
+        with col_map:
+            components.html(earth_globe_html(i, current_basemap(), file_stamp(*FILES_TOP100, FILE_WORLD)), height=620)
+            legend = [f"<span><span class='dot' style='background:{C_WORLD}'></span>Candidate site</span>"] if i >= 1 else []
+            if i >= 2 or (i == 1 and WORLD is None):
+                legend.append(f"<span><span class='dot' style='background:{C_TOP}'></span>Top 100</span>")
+            if i >= 1:
+                legend += [f"<span><span class='dot' style='background:{C_TOP};border:2px solid #fff'></span>#4 Recommended site</span>",
+                           "<span><span class='dot' style='background:#4fc3f7;border:2px solid #fff'></span>Priority target (clay signal)</span>",
+                           "<span>▲ Well-known analog</span>"]
+            st.markdown("<div class='legend'>" + "".join(legend) + "<span style='color:#7d8590'>Click a site on the globe "
+                        "for its details · map background: sidebar</span></div>", unsafe_allow_html=True)
+
+    else:
+        with col_map:
+            if i == 3:
+                focus = TOP[TOP["rang"] == 4]
+                center, zoom = ((focus.iloc[0]["lat"], focus.iloc[0]["lon"]), 4) if len(focus) else ((20, 10), 2)
+            else:
+                center, zoom = (20, 10), 2
+            m = base_map(center, zoom)
+            click_df = None
+            if i >= 1 and WORLD is not None:
+                add_points(m, WORLD, C_WORLD, 3, f"Candidate sites ({len(WORLD):,})", opacity=0.7 if i == 1 else 0.35)
+                click_df = WORLD
+            if i >= 2 or (i == 1 and WORLD is None):
+                add_points(m, TOP, C_TOP, 5, "Top 100", opacity=0.9)
+                click_df = TOP if WORLD is None else WORLD
+            if i >= 1:
+                add_known(m)
+                add_priority(m, TOP)
+            show_map(m, click_df, f"map_p1_{i}_{current_basemap()}", sel_key, height=620)
+            legend = []
+            if i >= 1:
+                legend.append(f"<span><span class='dot' style='background:{C_WORLD}'></span>Candidate site</span>")
+            if i >= 2 or (i == 1 and WORLD is None):
+                legend.append(f"<span><span class='dot' style='background:{C_TOP}'></span>Top 100</span>")
+            if i >= 1:
+                legend.append(f"<span><span class='dot' style='background:{C_TOP};border:2px solid #fff'></span>★ #4 Recommended site</span>")
+                legend.append("<span><span class='dot' style='background:#4fc3f7;border:2px solid #fff'></span>Priority target (clay signal)</span>")
+                legend.append("<span>▲ Well-known analog (Atacama, Utah, Qaidam…)</span>")
+            if legend:
+                st.markdown("<div class='legend'>" + "".join(legend) + "<span style='color:#7d8590'>Click a point to see the site</span></div>",
+                            unsafe_allow_html=True)
 
     if col_info is not None:
         with col_info:
@@ -2634,7 +3177,7 @@ elif page.startswith("3"):
 # 8. PAGE 4 · MARS: JEZERO AND ITS EARTH ANALOG
 # ----------------------------------------------------------------------------
 else:
-    page_title("Jezero on Mars, and its analog on Earth")
+    page_title("Jezero on Mars vs our new Earth sites")
     st.markdown("<p class='lead'>The target: Jezero crater, where NASA's Perseverance rover has been exploring since "
                 "February 2021. Everything on this page about Mars comes from NASA data and published mission results.</p>",
                 unsafe_allow_html=True)
@@ -2646,13 +3189,9 @@ else:
     used.append("pia23239")
     c1, c2 = st.columns([1.15, 1])
     with c1:
-        st.markdown(f"<img src='{JEZERO_IMG}' style='width:100%;border:1px solid #1f2937' "
-                    "alt='Jezero crater seen from orbit, with its delta coloured by minerals' "
-                    "onerror=\"this.outerHTML='<div class=card><div class=s>The NASA image could not load (no internet?). "
-                    f"<a href={SRC['pia23239'][1]} target=_blank>Open it on science.nasa.gov</a></div></div>'\">",
-                    unsafe_allow_html=True)
-        st.caption("Jezero crater from orbit (NASA Mars Reconnaissance Orbiter, CRISM + CTX). Colours show minerals: "
-                   f"the delta is rich in clays and carbonates. Credit: [NASA/JPL-Caltech/MSSS/JHU-APL, PIA23239]({SRC['pia23239'][1]})")
+        components.html(mars_globe_html(), height=500)
+        st.caption("Mars globe: NASA Mars Trek (Viking colour mosaic, NASA/JPL/USGS). Click the Jezero marker to see the crater "
+                   f"from orbit ([NASA/JPL-Caltech/MSSS/JHU-APL, PIA23239]({SRC['pia23239'][1]})).")
     with c2:
         st.markdown("### Jezero fact sheet")
         rows = "".join(f"<tr><td style='color:#9aa4b1;width:28%'>{k}</td><td>{v} "
@@ -2660,55 +3199,40 @@ else:
                        for k, v, src in JEZERO_FACTS)
         st.markdown(f"<table class='cmp'>{rows}</table>", unsafe_allow_html=True)
 
-    # Point-by-point parallel
+    # Point-by-point comparison: Jezero vs two of our new sites
     st.markdown("---")
-    st.markdown("### Point by point: Jezero vs. an Earth site")
-    rk = st.selectbox("Earth site", sorted(TOP["rang"]), index=sorted(TOP["rang"]).index(RECOMMENDED)
-                      if RECOMMENDED in set(TOP["rang"]) else 0,
-                      format_func=lambda r: f"#{r}" + (" (recommended)" if r == RECOMMENDED else ""))
-    r = site_row(rk)
-    g = lambda c: r[c] if c in r.index and pd.notna(r[c]) else None
-    where = escape(str(r.get("territoire", "") or ""))
-    clay = str(r.get("signal_argiles", "") or "")
-    ratio = g("ratio_argiles")
-    rows = [  # (dimension, Jezero, this site, verdict 'yes'/'part'/'no')
-        ("Basin", "45 km impact crater that held a lake",
-         "Salt basin (former lake bed) in the volcanic Puna; not an impact crater" if rk == RECOMMENDED
-         else escape(" · ".join(x for x in (str(r.get('typologie', '') or ''), str(r.get('morphotype', '') or '')) if x) or "—"),
-         "part"),
-        ("Past water", "Ancient lake and river delta",
-         "Closed basin where a lake dried out, leaving a salt flat" if rk == RECOMMENDED else "Not assessed for this site",
-         "yes" if rk == RECOMMENDED else "part"),
-        ("Salts", "Sulfates and perchlorates from evaporating brines",
-         "Salt crust from evaporation (white salt flat in Sentinel-2)" if rk == RECOMMENDED else "Not assessed for this site",
-         "yes" if rk == RECOMMENDED else "part"),
-        ("Clays", "Clays in the delta sediments",
-         f"Clay signal: {escape(clay_en(clay))}" + (f" (ratio {ratio:.2f}, ASTER)" if ratio is not None else ""),
-         "part" if clay.lower().startswith(("moyen", "fort", "moderate", "strong")) else "no"),
-        ("Rock", "Olivine-rich and basaltic (mafic) floor",
-         f"Mafic index score {g('compo_moy'):.2f} (ASTER)" if g("compo_moy") is not None else "—",
-         "yes" if (g("compo_moy") or 0) >= 0.7 else "part"),
-        ("Floor", "Flat crater floor",
-         f"Mean slope {g('pente_moy_deg'):.1f}°" if g("pente_moy_deg") is not None else "—",
-         "yes" if (g("pente_moy_deg") or 9) < 5 else "no"),
-        ("Relief", "Crater rim around the floor",
-         f"Local relief {g('relief_local_m'):.0f} m within 3 km" if g("relief_local_m") is not None else "—", "part"),
-        ("Water today", "None at the surface", f"Max NDVI {g('ndvi_max'):.2f}, aridity index {g('aridite'):.3f}"
-         if g("ndvi_max") is not None and g("aridite") is not None else "—",
-         "yes" if (g("aridite") or 1) <= 0.05 else "part"),
-        ("Daily swing", "Ground swings by ≈ 56 to 87 K", f"{g('amplitude_k'):.0f} K" if g("amplitude_k") is not None else "—", "no"),
-        ("Temperature", "Far below freezing on average", f"Mean surface {g('temp_moy_c'):.1f} °C" if g("temp_moy_c") is not None else "—",
-         "no" if (g("temp_moy_c") or 0) > -15 else "part"),
-        ("Gravity, air, radiation", "0.38 g, ≈ 6.4 hPa CO₂, no magnetic shield", "1 g, ≈ 1,000 hPa, magnetic field", "no"),
-    ]
-    V = {"yes": ("✓ Strong", "#2e9e5b"), "part": ("~ Partial", "#f2b134"), "no": ("✗ Breaks down", "#e03b2e")}
-    body = "".join(f"<tr><td style='color:#9aa4b1'>{d}</td><td>{j}</td><td>{e}</td>"
-                   f"<td style='color:{V[v][1]};white-space:nowrap'><b>{V[v][0]}</b></td></tr>" for d, j, e, v in rows)
-    st.markdown(f"<table class='cmp'><tr><th>Dimension</th><th>Jezero (Mars)</th><th>Site #{rk}"
-                + (f" · {where}" if where else "") + f"</th><th>Analogy</th></tr>{body}</table>", unsafe_allow_html=True)
-    nv = pd.Series([v for *_, v in rows]).value_counts()
-    st.caption(f"{nv.get('yes', 0)} strong, {nv.get('part', 0)} partial, {nv.get('no', 0)} where the analogy breaks down. "
-               "Site values: MODIS, TerraClimate, MERIT DEM and ASTER, computed in Google Earth Engine.")
+    st.markdown("### Jezero vs our new sites")
+    st.markdown("<p class='lead'>Sites the model found far from the well-known analogs. Pick two and compare them with "
+                "Jezero, dimension by dimension.</p>", unsafe_allow_html=True)
+    feat = [r for r in FEATURED if r in set(TOP["rang"])]
+    fcols = st.columns(len(feat)) if feat else []
+    for col, rk in zip(fcols, feat):
+        r = site_row(rk)
+        _, ms = jezero_compare(r)
+        card(col, featured_label(rk), f"{ms:.0f}<span style='font-size:0.9rem;color:#9aa4b1'> / 100 Jezero match</span>",
+             f"Model score {r['score']:.0f}/100 · {escape(novelty_text(r))}")
+    s1, s2 = st.columns(2)
+    ka = s1.selectbox("Site A", feat, index=0, format_func=featured_label, key="cmp_a")
+    kb = s2.selectbox("Site B", feat, index=min(1, len(feat) - 1), format_func=featured_label, key="cmp_b")
+    ra, rb = site_row(ka), site_row(kb)
+    rows_a, score_a = jezero_compare(ra)
+    rows_b, score_b = jezero_compare(rb)
+    V = {"yes": ("✓ Strong", "#2e9e5b"), "part": ("~ Partial", "#f2b134"), "no": ("✗ Breaks down", "#e03b2e"),
+         "info": ("observed, not scored", "#7d8590")}
+    cell = lambda txt, v: (f"{txt}<br><span style='color:{V[v][1]};font-size:0.8rem;white-space:nowrap'><b>{V[v][0]}</b></span>")
+    body = "".join(f"<tr><td style='color:#9aa4b1'>{d}</td><td>{j}</td><td>{cell(ea, va)}</td><td>{cell(eb, vb)}</td></tr>"
+                   for (d, j, ea, va), (_, _, eb, vb) in zip(rows_a, rows_b))
+    body += (f"<tr><td style='color:#f0f3f6'><b>Jezero match</b></td><td>—</td>"
+             f"<td><b style='font-size:1.1rem'>{score_a:.0f} / 100</b></td><td><b style='font-size:1.1rem'>{score_b:.0f} / 100</b></td></tr>"
+             f"<tr><td style='color:#f0f3f6'><b>Model score</b></td><td>—</td>"
+             f"<td><b>{ra['score']:.0f} / 100</b> · {escape(str(ra.get('profil', '')))}</td>"
+             f"<td><b>{rb['score']:.0f} / 100</b> · {escape(str(rb.get('profil', '')))}</td></tr>")
+    st.markdown(f"<table class='cmp'><tr><th>Dimension</th><th>Jezero (Mars)</th><th>{escape(featured_label(ka))}</th>"
+                f"<th>{escape(featured_label(kb))}</th></tr>{body}</table>", unsafe_allow_html=True)
+    st.caption("Jezero match = average over the measured dimensions (✓ = 1, ~ = 0.5, ✗ = 0), out of 100. Rows marked "
+               "'observed, not scored' come from looking at satellite images, so they do not count. Gravity, air and radiation "
+               "are the same for every Earth site and are left out of the score. Model score = the similarity score of our "
+               "3-step model. Site values: MODIS, TerraClimate, MERIT DEM and ASTER, computed in Google Earth Engine.")
 
     # Process
     st.markdown("---")
